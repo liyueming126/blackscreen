@@ -1,0 +1,9 @@
+/nologo
+/noconfig
+/target:winexe
+/codepage:65001
+/out:D:\blackscreen\午休黑屏.exe
+/r:System.dll
+/r:System.Drawing.dll
+/r:System.Windows.Forms.dll
+D:\blackscreen\Program.cs
