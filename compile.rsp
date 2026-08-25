@@ -2,7 +2,9 @@
 /noconfig
 /target:winexe
 /codepage:65001
-/out:D:\blackscreen\午休黑屏.exe
+/win32manifest:D:\blackscreen\app.manifest
+/win32icon:D:\blackscreen\app.ico
+/out:D:\blackscreen\午休息屏.exe
 /r:System.dll
 /r:System.Drawing.dll
 /r:System.Windows.Forms.dll

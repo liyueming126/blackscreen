@@ -7,7 +7,7 @@ using System.Threading;
 using System.Windows.Forms;
 using Microsoft.Win32;
 
-namespace BlacksreenNap
+namespace NapScreenOff
 {
     internal class Config
     {
@@ -94,7 +94,7 @@ namespace BlacksreenNap
             try
             {
                 File.WriteAllText(_path,
-                    "; 午休黑屏配置文件（可手动编辑，修改后需重启程序生效）\n"
+                    "; 午休息屏配置文件（可手动编辑，修改后需重启程序生效）\n"
                     + "; start/end 为 HH:mm 格式\n"
                     + "; days: 每周生效日期，1=周一、7=周日，如 days=1234567 表示每天\n"
                     + "; policy: strict=强制锁定 / temp=可临时退出(1分钟) / day=退出后当天不再显示\n"
@@ -105,13 +105,14 @@ namespace BlacksreenNap
         }
     }
 
-    internal class BlackForm : Form
+    // 息屏方式：弹出全屏纯黑覆盖窗口（看起来像显示器关了，但系统仍在运行）
+    internal class ScreenOffForm : Form
     {
         private bool _allowClose;
 
         public event EventHandler ExitRequest;
 
-        public BlackForm()
+        public ScreenOffForm()
         {
             FormBorderStyle = FormBorderStyle.None;
             ShowInTaskbar = false;
@@ -132,15 +133,17 @@ namespace BlacksreenNap
             if (ExitRequest != null) ExitRequest(this, EventArgs.Empty);
         }
 
-        public void ShowBlack()
+        public void ShowOverlay()
         {
             if (Visible) { Activate(); return; }
+            // 每次弹出前按当前显示器布局重新计算全屏范围
+            Bounds = SystemInformation.VirtualScreen;
             Cursor.Hide();
             Show();
             Activate();
         }
 
-        public void HideBlack()
+        public void HideOverlay()
         {
             if (!Visible) return;
             Cursor.Show();
@@ -163,9 +166,9 @@ namespace BlacksreenNap
     internal class SettingsForm : Form
     {
         private static readonly string[] PolicyNames = {
-            "强制锁定（黑屏期间无法手动退出）",
-            "临时退出（双击/Esc 退出，1 分钟后重新黑屏）",
-            "退出后当天不再显示黑屏"
+            "强制锁定（息屏期间无法手动退出）",
+            "临时退出（双击/Esc 退出，1 分钟后重新息屏）",
+            "退出后当天不再显示息屏"
         };
         private static readonly string[] DayLabels = { "一", "二", "三", "四", "五", "六", "日" };
 
@@ -208,12 +211,15 @@ namespace BlacksreenNap
 
         public SettingsForm(string start, string end, bool enabled, string policy, string days, bool autoStart)
         {
-            Text = "午休黑屏 设置";
+            Text = "午休息屏 设置";
             FormBorderStyle = FormBorderStyle.FixedDialog;
             MaximizeBox = false;
             MinimizeBox = false;
             StartPosition = FormStartPosition.CenterScreen;
             ClientSize = new Size(380, 200);
+            // 按屏幕 DPI 自动缩放控件，适应不同分辨率/缩放级别
+            AutoScaleDimensions = new SizeF(96F, 96F);
+            AutoScaleMode = AutoScaleMode.Dpi;
 
             Label l1 = new Label { Text = "开始时间（HH:mm）", Location = new Point(15, 12), AutoSize = true };
             _start.Text = start;
@@ -230,17 +236,25 @@ namespace BlacksreenNap
             _autoStart.Location = new Point(262, 9);
             _autoStart.AutoSize = true;
 
-            _enabled.Text = "启用午休黑屏";
+            _enabled.Text = "启用午休息屏";
             _enabled.Checked = enabled;
             _enabled.Location = new Point(262, 41);
             _enabled.AutoSize = true;
 
-            Label l3 = new Label { Text = "黑屏退出方式", Location = new Point(15, 78), AutoSize = true };
+            Label l3 = new Label { Text = "息屏退出方式", Location = new Point(15, 78), AutoSize = true };
             _policy.DropDownStyle = ComboBoxStyle.DropDownList;
             _policy.Location = new Point(150, 75);
-            _policy.Width = 175;
+            _policy.Width = 215;
             _policy.Items.AddRange(PolicyNames);
             _policy.SelectedIndex = IndexOfPolicy(policy);
+            // 下拉列表宽度按最长选项自适应，保证文字完整可见
+            int maxW = 0;
+            foreach (string s in PolicyNames)
+            {
+                int w = TextRenderer.MeasureText(s, _policy.Font).Width;
+                if (w > maxW) maxW = w;
+            }
+            _policy.DropDownWidth = maxW + SystemInformation.VerticalScrollBarWidth + 4;
 
             Label l4 = new Label { Text = "生效日期", Location = new Point(15, 114), AutoSize = true };
             for (int i = 0; i < 7; i++)
@@ -270,12 +284,12 @@ namespace BlacksreenNap
             TimeSpan d1, d2;
             if (!Config.ParseTime(StartSetting, out d1) || !Config.ParseTime(EndSetting, out d2))
             {
-                MessageBox.Show(this, "时间格式错误，请使用 HH:mm 格式，例如 12:10。", "午休黑屏");
+                MessageBox.Show(this, "时间格式错误，请使用 HH:mm 格式，例如 12:10。", "午休息屏");
                 return false;
             }
             if (d2 <= d1)
             {
-                MessageBox.Show(this, "结束时间必须晚于开始时间。", "午休黑屏");
+                MessageBox.Show(this, "结束时间必须晚于开始时间。", "午休息屏");
                 return false;
             }
             bool anyDay = false;
@@ -283,7 +297,7 @@ namespace BlacksreenNap
                 if (c.Checked) anyDay = true;
             if (!anyDay)
             {
-                MessageBox.Show(this, "请至少选择一个生效日期。", "午休黑屏");
+                MessageBox.Show(this, "请至少选择一个生效日期。", "午休息屏");
                 return false;
             }
             return true;
@@ -293,13 +307,13 @@ namespace BlacksreenNap
     internal class TrayApp : ApplicationContext
     {
         private const string RunKeyPath = @"Software\Microsoft\Windows\CurrentVersion\Run";
-        private const string RunValueName = "BlackScreenNap";
+        private const string RunValueName = "NapScreenOff";
 
         private readonly Config _cfg;
         private readonly NotifyIcon _tray = new NotifyIcon();
-        private readonly BlackForm _black = new BlackForm();
+        private readonly ScreenOffForm _overlay = new ScreenOffForm();
         private readonly Mutex _mutex;
-        private readonly ToolStripMenuItem _mEnable = new ToolStripMenuItem("启用午休黑屏");
+        private readonly ToolStripMenuItem _mEnable = new ToolStripMenuItem("启用午休息屏");
         private readonly ToolStripMenuItem _mAuto = new ToolStripMenuItem("开机自启动");
 
         private System.Windows.Forms.Timer _clock;
@@ -310,10 +324,10 @@ namespace BlacksreenNap
         public TrayApp(string baseDir, Mutex mutex, bool showSettingsAtStart)
         {
             _mutex = mutex;
-            _cfg = new Config(Path.Combine(baseDir, "config.ini"));
+            _cfg = new Config(Program.ResolveConfigPath(baseDir));
             if (!File.Exists(_cfg.FilePath)) _cfg.Save();
 
-            _black.ExitRequest += delegate { DismissBlack(false); };
+            _overlay.ExitRequest += delegate { DismissScreenOff(false); };
 
             _tray.Icon = MakeIcon();
             _tray.Visible = true;
@@ -335,10 +349,10 @@ namespace BlacksreenNap
                 _mAuto.Checked = !now;
             };
 
-            ToolStripMenuItem mExitBlack = new ToolStripMenuItem("立即退出当前黑屏");
-            mExitBlack.Click += delegate { DismissBlack(true); };
+            ToolStripMenuItem mExitBlack = new ToolStripMenuItem("立即退出当前息屏");
+            mExitBlack.Click += delegate { DismissScreenOff(true); };
 
-            ToolStripMenuItem mTest = new ToolStripMenuItem("测试黑屏（5 秒）");
+            ToolStripMenuItem mTest = new ToolStripMenuItem("测试息屏（5 秒）");
             mTest.Click += delegate { StartTest(); };
 
             ToolStripMenuItem mSettings = new ToolStripMenuItem("设置...");
@@ -382,29 +396,29 @@ namespace BlacksreenNap
                 if (DateTime.Now >= _dismissUntil)
                 {
                     _dismissUntil = DateTime.MinValue;
-                    _black.ShowBlack();
+                    _overlay.ShowOverlay();
                 }
-                _tray.Text = "午休黑屏：黑屏中，至 " + _cfg.EndTime;
+                _tray.Text = "午休息屏：息屏中，至 " + _cfg.EndTime;
             }
             else
             {
-                if (_black.Visible) _black.HideBlack();
-                _tray.Text = "午休黑屏：" + _cfg.StartTime + "-" + _cfg.EndTime + (_cfg.Enabled ? " 已启用" : " 已停用");
+                if (_overlay.Visible) _overlay.HideOverlay();
+                _tray.Text = "午休息屏：" + _cfg.StartTime + "-" + _cfg.EndTime + (_cfg.Enabled ? " 已启用" : " 已停用");
             }
         }
 
-        private void DismissBlack(bool informative)
+        private void DismissScreenOff(bool informative)
         {
-            if (!_black.Visible) return;
+            if (!_overlay.Visible) return;
 
             if (_cfg.Policy == "strict")
             {
                 if (informative)
-                    MessageBox.Show("当前为强制锁定模式，黑屏无法手动退出，将在结束时间自动恢复。", "午休黑屏");
+                    MessageBox.Show("当前为强制锁定模式，息屏无法手动退出，将在结束时间自动恢复。", "午休息屏");
                 return;
             }
 
-            _black.HideBlack();
+            _overlay.HideOverlay();
             if (_cfg.Policy == "day")
                 _dismissUntil = DateTime.Today.AddDays(1);
             else
@@ -414,13 +428,13 @@ namespace BlacksreenNap
         private void StartTest()
         {
             _testing = true;
-            _black.ShowBlack();
+            _overlay.ShowOverlay();
             _testTimer = new System.Windows.Forms.Timer();
             _testTimer.Interval = 5000;
             _testTimer.Tick += delegate
             {
                 _testing = false;
-                if (_black.Visible) _black.HideBlack();
+                if (_overlay.Visible) _overlay.HideOverlay();
                 _testTimer.Stop();
                 _testTimer.Dispose();
             };
@@ -474,7 +488,7 @@ namespace BlacksreenNap
             }
             catch (Exception ex)
             {
-                MessageBox.Show("设置开机自启动失败：" + ex.Message, "午休黑屏");
+                MessageBox.Show("设置开机自启动失败：" + ex.Message, "午休息屏");
             }
         }
 
@@ -496,7 +510,7 @@ namespace BlacksreenNap
         {
             _tray.Visible = false;
             _tray.Dispose();
-            if (_black.Visible) _black.ForceClose();
+            if (_overlay.Visible) _overlay.ForceClose();
             _clock.Stop();
             if (_testTimer != null) _testTimer.Stop();
             try { _mutex.ReleaseMutex(); } catch { }
@@ -506,6 +520,25 @@ namespace BlacksreenNap
 
     internal static class Program
     {
+        // 优先用 exe 同目录（方便整包分发）；目录不可写时（如 Program Files、共享盘）
+        // 改用各用户自己的 LocalAppData，保证人人可保存自己的设置
+        public static string ResolveConfigPath(string baseDir)
+        {
+            try
+            {
+                string probe = Path.Combine(baseDir, ".wprobe" + Environment.TickCount);
+                using (File.Create(probe)) { }
+                File.Delete(probe);
+                return Path.Combine(baseDir, "config.ini");
+            }
+            catch
+            {
+                string dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "NapScreenOff");
+                try { Directory.CreateDirectory(dir); } catch { }
+                return Path.Combine(dir, "config.ini");
+            }
+        }
+
         [STAThread]
         private static void Main()
         {
@@ -513,10 +546,10 @@ namespace BlacksreenNap
             Application.SetCompatibleTextRenderingDefault(false);
 
             bool firstInstance;
-            Mutex m = new Mutex(true, "BlackScreenNap_SingleInstance", out firstInstance);
+            Mutex m = new Mutex(true, "NapScreenOff_SingleInstance", out firstInstance);
             if (!firstInstance)
             {
-                MessageBox.Show("午休黑屏已在后台运行，请查看任务栏右侧的托盘图标。", "午休黑屏");
+                MessageBox.Show("午休息屏已在后台运行，请查看任务栏右侧的托盘图标。", "午休息屏");
                 return;
             }
 
@@ -536,7 +569,7 @@ namespace BlacksreenNap
             }
             catch (Exception ex)
             {
-                MessageBox.Show("程序启动失败：" + ex.Message, "午休黑屏");
+                MessageBox.Show("程序启动失败：" + ex.Message, "午休息屏");
             }
         }
     }
