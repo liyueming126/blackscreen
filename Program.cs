@@ -376,6 +376,7 @@ namespace NapScreenOff
         private bool _testing;
         private DateTime _dismissUntil;
         private string _trayText;
+        private SettingsForm _settingsOpen;
 
         public TrayApp(string baseDir, Mutex mutex, bool showSettingsAtStart)
         {
@@ -461,7 +462,8 @@ namespace NapScreenOff
                 if (DateTime.Now >= _dismissUntil)
                 {
                     _dismissUntil = DateTime.MinValue;
-                    if (!_overlay.Visible)
+                    // 设置窗口打开时暂不黑屏，避免盖住设置界面；关闭后 1 秒内自动补上
+                    if (!_overlay.Visible && _settingsOpen == null)
                     {
                         _overlay.ShowOverlay();
                         if (_cfg.ShowHint) _overlay.ShowHint(PolicyHintText(), 4000);
@@ -471,7 +473,9 @@ namespace NapScreenOff
                 else
                 {
                     if (_overlay.Visible) _overlay.HideOverlay();
-                    if (_cfg.Policy == "day")
+                    if (_settingsOpen != null)
+                        SetTrayText("午休息屏：设置已打开");
+                    else if (_cfg.Policy == "day")
                         SetTrayText("午休息屏：今天不再显示");
                     else
                         SetTrayText("午休息屏：已暂停，" + _dismissUntil.ToString("HH:mm") + " 自动恢复");
@@ -559,27 +563,43 @@ namespace NapScreenOff
 
         private void ShowSettings()
         {
+            if (_settingsOpen != null)
+            {
+                // 已有设置窗口（连续双击托盘图标/重复点菜单）：前置已打开的窗口，不再叠加新窗口
+                _settingsOpen.Activate();
+                _settingsOpen.BringToFront();
+                return;
+            }
+
             using (SettingsForm f = new SettingsForm(_cfg.StartTime, _cfg.EndTime, _cfg.Enabled, _cfg.Policy, _cfg.Days, IsAutoStart(), _cfg.ShowHint))
             {
+                _settingsOpen = f;
                 // 息屏中打开设置时，让窗口显示在黑屏之上
                 f.TopMost = _overlay.Visible;
-                if (f.ShowDialog() == DialogResult.OK)
+                try
                 {
-                    _cfg.StartTime = f.StartSetting;
-                    _cfg.EndTime = f.EndSetting;
-                    _cfg.Enabled = f.EnabledSetting;
-                    _cfg.Policy = f.PolicySetting;
-                    _cfg.Days = f.DaysSetting;
-                    _cfg.ShowHint = f.ShowHintSetting;
-                    _cfg.Save();
+                    if (f.ShowDialog() == DialogResult.OK)
+                    {
+                        _cfg.StartTime = f.StartSetting;
+                        _cfg.EndTime = f.EndSetting;
+                        _cfg.Enabled = f.EnabledSetting;
+                        _cfg.Policy = f.PolicySetting;
+                        _cfg.Days = f.DaysSetting;
+                        _cfg.ShowHint = f.ShowHintSetting;
+                        _cfg.Save();
 
-                    bool reg = IsAutoStart();
-                    if (f.AutoStartSetting != reg) SetAutoStart(f.AutoStartSetting);
-                    else if (f.AutoStartSetting) SyncAutoStartPath();
+                        bool reg = IsAutoStart();
+                        if (f.AutoStartSetting != reg) SetAutoStart(f.AutoStartSetting);
+                        else if (f.AutoStartSetting) SyncAutoStartPath();
 
-                    _mAuto.Checked = f.AutoStartSetting;
-                    _mEnable.Checked = _cfg.Enabled;
-                    Update();
+                        _mAuto.Checked = f.AutoStartSetting;
+                        _mEnable.Checked = _cfg.Enabled;
+                        Update();
+                    }
+                }
+                finally
+                {
+                    _settingsOpen = null;
                 }
             }
         }
