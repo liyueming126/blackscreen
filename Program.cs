@@ -16,6 +16,7 @@ namespace NapScreenOff
         public bool Enabled = true;
         public string Policy = "temp";
         public string Days = "1234567";
+        public bool ShowHint = false;
         private readonly string _path;
 
         public string FilePath { get { return _path; } }
@@ -39,6 +40,7 @@ namespace NapScreenOff
                     else if (key == "enabled") Enabled = val.Equals("true", StringComparison.OrdinalIgnoreCase) || val == "1";
                     else if (key == "policy") Policy = val;
                     else if (key == "days") Days = SanitizeDays(val);
+                    else if (key == "hint") ShowHint = val.Equals("true", StringComparison.OrdinalIgnoreCase) || val == "1";
                 }
             }
             catch { }
@@ -58,7 +60,7 @@ namespace NapScreenOff
 
         public static bool IsValidPolicy(string s)
         {
-            return s == "strict" || s == "temp" || s == "day";
+            return s == "temp" || s == "day";
         }
 
         private static string SanitizeDays(string s)
@@ -97,8 +99,9 @@ namespace NapScreenOff
                     "; 午休息屏配置文件（可手动编辑，修改后需重启程序生效）\n"
                     + "; start/end 为 HH:mm 格式\n"
                     + "; days: 每周生效日期，1=周一、7=周日，如 days=1234567 表示每天\n"
-                    + "; policy: strict=强制锁定 / temp=可临时退出(1分钟) / day=退出后当天不再显示\n"
-                    + "start=" + StartTime + "\nend=" + EndTime + "\nenabled=" + (Enabled ? "true" : "false") + "\npolicy=" + Policy + "\ndays=" + Days + "\n",
+                    + "; policy: temp=可临时退出(1分钟) / day=退出后当天不再显示\n"
+                    + "; hint: true=息屏时在黑屏上显示操作提示文字 / false=纯净黑屏\n"
+                    + "start=" + StartTime + "\nend=" + EndTime + "\nenabled=" + (Enabled ? "true" : "false") + "\npolicy=" + Policy + "\ndays=" + Days + "\nhint=" + (ShowHint ? "true" : "false") + "\n",
                     Encoding.UTF8);
             }
             catch { }
@@ -109,8 +112,13 @@ namespace NapScreenOff
     internal class ScreenOffForm : Form
     {
         private bool _allowClose;
+        private bool _cursorHidden;
+        private readonly Label _hint = new Label();
+        private readonly System.Windows.Forms.Timer _hintTimer = new System.Windows.Forms.Timer();
 
         public event EventHandler ExitRequest;
+        // 息屏期间用户按了除 Esc 外的键、或单击鼠标（想操作却摸黑时的提示）
+        public event EventHandler PassiveInput;
 
         public ScreenOffForm()
         {
@@ -120,45 +128,90 @@ namespace NapScreenOff
             Bounds = SystemInformation.VirtualScreen;
             TopMost = true;
             KeyPreview = true;
+            // 防止输入法候选窗在息屏画面上冒出来
+            ImeMode = ImeMode.Disable;
+
+            _hint.AutoSize = false;
+            _hint.TextAlign = ContentAlignment.MiddleCenter;
+            _hint.ForeColor = Color.FromArgb(118, 118, 118);
+            _hint.BackColor = Color.Black;
+            _hint.Font = new Font("Microsoft YaHei UI", 15F);
+            _hint.Visible = false;
+            Controls.Add(_hint);
+            _hintTimer.Tick += delegate { _hintTimer.Stop(); _hint.Visible = false; };
+
             KeyDown += delegate(object s, KeyEventArgs e)
             {
-                if (e.KeyCode == Keys.Escape) RaiseExitRequest();
+                if (e.KeyCode == Keys.Escape) Raise(ExitRequest);
+                else Raise(PassiveInput);
             };
-            MouseDoubleClick += delegate(object s, MouseEventArgs e) { RaiseExitRequest(); };
+            MouseClick += delegate { Raise(PassiveInput); };
+            MouseDoubleClick += delegate(object s, MouseEventArgs e) { Raise(ExitRequest); };
+            _hint.MouseClick += delegate { Raise(PassiveInput); };
+            _hint.MouseDoubleClick += delegate(object s, MouseEventArgs e) { Raise(ExitRequest); };
             Deactivate += delegate(object s, EventArgs e) { if (Visible) TopMost = true; };
         }
 
-        private void RaiseExitRequest()
+        private void Raise(EventHandler h)
         {
-            if (ExitRequest != null) ExitRequest(this, EventArgs.Empty);
+            if (h != null) h(this, EventArgs.Empty);
+        }
+
+        private void CenterHint()
+        {
+            int w = Math.Min(ClientSize.Width - 80, 780);
+            int h = 170;
+            _hint.Bounds = new Rectangle((ClientSize.Width - w) / 2, (ClientSize.Height - h) / 2, w, h);
+        }
+
+        protected override void OnResize(EventArgs e)
+        {
+            base.OnResize(e);
+            CenterHint();
+        }
+
+        // 在纯黑画面上短暂显示提示文字（息屏时唯一的反馈渠道）
+        public void ShowHint(string text, int ms)
+        {
+            if (string.IsNullOrEmpty(text) || !Visible) return;
+            _hint.Text = text;
+            CenterHint();
+            _hint.Visible = true;
+            _hintTimer.Stop();
+            _hintTimer.Interval = ms;
+            _hintTimer.Start();
         }
 
         public void ShowOverlay()
         {
-            if (Visible) { Activate(); return; }
+            if (Visible) return;
             // 每次弹出前按当前显示器布局重新计算全屏范围
             Bounds = SystemInformation.VirtualScreen;
-            Cursor.Hide();
             Show();
+            if (!_cursorHidden) { Cursor.Hide(); _cursorHidden = true; }
             Activate();
         }
 
         public void HideOverlay()
         {
             if (!Visible) return;
-            Cursor.Show();
+            _hintTimer.Stop();
+            _hint.Visible = false;
+            if (_cursorHidden) { Cursor.Show(); _cursorHidden = false; }
             Hide();
         }
 
         public void ForceClose()
         {
+            if (_cursorHidden) { Cursor.Show(); _cursorHidden = false; }
             _allowClose = true;
             Close();
         }
 
         protected override void OnFormClosing(FormClosingEventArgs e)
         {
-            if (!_allowClose) e.Cancel = true;
+            // 只拦截用户主动关闭（Alt+F4 等）；系统关机/注销/任务管理器结束任务必须放行
+            if (!_allowClose && e.CloseReason == CloseReason.UserClosing) e.Cancel = true;
             base.OnFormClosing(e);
         }
     }
@@ -166,7 +219,6 @@ namespace NapScreenOff
     internal class SettingsForm : Form
     {
         private static readonly string[] PolicyNames = {
-            "强制锁定（息屏期间无法手动退出）",
             "临时退出（双击/Esc 退出，1 分钟后重新息屏）",
             "退出后当天不再显示息屏"
         };
@@ -177,12 +229,14 @@ namespace NapScreenOff
         private readonly CheckBox _enabled = new CheckBox();
         private readonly CheckBox _autoStart = new CheckBox();
         private readonly ComboBox _policy = new ComboBox();
+        private readonly CheckBox _showHint = new CheckBox();
         private readonly CheckBox[] _dayChecks = new CheckBox[7];
 
         public string StartSetting { get { return _start.Text.Trim(); } }
         public string EndSetting { get { return _end.Text.Trim(); } }
         public bool EnabledSetting { get { return _enabled.Checked; } }
         public bool AutoStartSetting { get { return _autoStart.Checked; } }
+        public bool ShowHintSetting { get { return _showHint.Checked; } }
         public string PolicySetting { get { return PolicyOf(_policy.SelectedIndex); } }
         public string DaysSetting
         {
@@ -197,26 +251,22 @@ namespace NapScreenOff
 
         private static string PolicyOf(int idx)
         {
-            if (idx == 0) return "strict";
-            if (idx == 2) return "day";
-            return "temp";
+            return idx == 1 ? "day" : "temp";
         }
 
         private static int IndexOfPolicy(string p)
         {
-            if (p == "strict") return 0;
-            if (p == "day") return 2;
-            return 1;
+            return p == "day" ? 1 : 0;
         }
 
-        public SettingsForm(string start, string end, bool enabled, string policy, string days, bool autoStart)
+        public SettingsForm(string start, string end, bool enabled, string policy, string days, bool autoStart, bool showHint)
         {
             Text = "午休息屏 设置";
             FormBorderStyle = FormBorderStyle.FixedDialog;
             MaximizeBox = false;
             MinimizeBox = false;
             StartPosition = FormStartPosition.CenterScreen;
-            ClientSize = new Size(380, 200);
+            ClientSize = new Size(380, 234);
             // 按屏幕 DPI 自动缩放控件，适应不同分辨率/缩放级别
             AutoScaleDimensions = new SizeF(96F, 96F);
             AutoScaleMode = AutoScaleMode.Dpi;
@@ -269,12 +319,17 @@ namespace NapScreenOff
                 Controls.Add(c);
             }
 
-            Button ok = new Button { Text = "保存", Location = new Point(150, 160) };
+            _showHint.Text = "息屏时在黑屏上显示操作提示文字";
+            _showHint.Checked = showHint;
+            _showHint.Location = new Point(15, 142);
+            _showHint.AutoSize = true;
+
+            Button ok = new Button { Text = "保存", Location = new Point(150, 198) };
             ok.Click += delegate { if (ValidateInput()) DialogResult = DialogResult.OK; };
-            Button cancel = new Button { Text = "取消", Location = new Point(245, 160) };
+            Button cancel = new Button { Text = "取消", Location = new Point(245, 198) };
             cancel.Click += delegate { DialogResult = DialogResult.Cancel; };
 
-            Controls.AddRange(new Control[] { l1, _start, l2, _end, _autoStart, _enabled, l3, _policy, l4, ok, cancel });
+            Controls.AddRange(new Control[] { l1, _start, l2, _end, _autoStart, _enabled, l3, _policy, l4, _showHint, ok, cancel });
             AcceptButton = ok;
             CancelButton = cancel;
         }
@@ -320,6 +375,7 @@ namespace NapScreenOff
         private System.Windows.Forms.Timer _testTimer;
         private bool _testing;
         private DateTime _dismissUntil;
+        private string _trayText;
 
         public TrayApp(string baseDir, Mutex mutex, bool showSettingsAtStart)
         {
@@ -328,9 +384,13 @@ namespace NapScreenOff
             if (!File.Exists(_cfg.FilePath)) _cfg.Save();
 
             _overlay.ExitRequest += delegate { DismissScreenOff(false); };
+            _overlay.PassiveInput += delegate { ShowStatusHint(); };
 
             _tray.Icon = MakeIcon();
+            _tray.BalloonTipTitle = "午休息屏";
             _tray.Visible = true;
+
+            SyncAutoStartPath();
 
             _mEnable.Checked = _cfg.Enabled;
             _mEnable.Click += delegate
@@ -373,9 +433,14 @@ namespace NapScreenOff
             _tray.ContextMenuStrip = menu;
             _tray.DoubleClick += delegate { ShowSettings(); };
 
+            // 1 秒轮询：到点后最多 1 秒内息屏/恢复（原来 10 秒轮询最多要等 10 秒）
             _clock = new System.Windows.Forms.Timer();
-            _clock.Interval = 10000;
-            _clock.Tick += delegate { Update(); };
+            _clock.Interval = 1000;
+            _clock.Tick += delegate
+            {
+                try { Update(); }
+                catch { }   // 时钟里的异常不能杀死托盘程序
+            };
             _clock.Start();
 
             Update();
@@ -396,55 +461,108 @@ namespace NapScreenOff
                 if (DateTime.Now >= _dismissUntil)
                 {
                     _dismissUntil = DateTime.MinValue;
-                    _overlay.ShowOverlay();
+                    if (!_overlay.Visible)
+                    {
+                        _overlay.ShowOverlay();
+                        if (_cfg.ShowHint) _overlay.ShowHint(PolicyHintText(), 4000);
+                    }
+                    SetTrayText("午休息屏：息屏中，至 " + _cfg.EndTime);
                 }
-                _tray.Text = "午休息屏：息屏中，至 " + _cfg.EndTime;
+                else
+                {
+                    if (_overlay.Visible) _overlay.HideOverlay();
+                    if (_cfg.Policy == "day")
+                        SetTrayText("午休息屏：今天不再显示");
+                    else
+                        SetTrayText("午休息屏：已暂停，" + _dismissUntil.ToString("HH:mm") + " 自动恢复");
+                }
             }
             else
             {
                 if (_overlay.Visible) _overlay.HideOverlay();
-                _tray.Text = "午休息屏：" + _cfg.StartTime + "-" + _cfg.EndTime + (_cfg.Enabled ? " 已启用" : " 已停用");
+                SetTrayText("午休息屏：" + _cfg.StartTime + "-" + _cfg.EndTime + (_cfg.Enabled ? " 已启用" : " 已停用"));
             }
         }
 
-        private void DismissScreenOff(bool informative)
+        private void SetTrayText(string text)
         {
-            if (!_overlay.Visible) return;
+            if (_trayText == text) return;
+            _trayText = text;
+            _tray.Text = text;
+        }
 
-            if (_cfg.Policy == "strict")
+        private string PolicyHintText()
+        {
+            if (_cfg.Policy == "day")
+                return "午休息屏中（至 " + _cfg.EndTime + "）\n按 Esc 或双击鼠标退出后，今天不再显示";
+            return "午休息屏中（至 " + _cfg.EndTime + "）\n按 Esc 或双击鼠标可临时退出";
+        }
+
+        private void ShowStatusHint()
+        {
+            if (!_cfg.ShowHint) return;
+            if (_testing)
+                _overlay.ShowHint("测试息屏（5 秒）\n按 Esc 或双击鼠标可提前结束", 2500);
+            else
+                _overlay.ShowHint(PolicyHintText(), 2500);
+        }
+
+        private void DismissScreenOff(bool fromMenu)
+        {
+            if (_testing) { EndTest(); return; }
+
+            if (!_overlay.Visible)
             {
-                if (informative)
-                    MessageBox.Show("当前为强制锁定模式，息屏无法手动退出，将在结束时间自动恢复。", "午休息屏");
+                if (fromMenu) _tray.ShowBalloonTip(3000, "午休息屏", "当前没有在息屏。", ToolTipIcon.None);
                 return;
             }
 
             _overlay.HideOverlay();
             if (_cfg.Policy == "day")
+            {
                 _dismissUntil = DateTime.Today.AddDays(1);
+                _tray.ShowBalloonTip(3000, "午休息屏", "已退出息屏，今天不再显示。", ToolTipIcon.None);
+            }
             else
+            {
                 _dismissUntil = DateTime.Now.AddMinutes(1);
+                _tray.ShowBalloonTip(3000, "午休息屏", "已临时退出息屏，" + _dismissUntil.ToString("HH:mm") + " 将自动重新息屏。", ToolTipIcon.None);
+            }
+            Update();
         }
 
         private void StartTest()
         {
+            if (_testing) return;
+
             _testing = true;
             _overlay.ShowOverlay();
-            _testTimer = new System.Windows.Forms.Timer();
-            _testTimer.Interval = 5000;
-            _testTimer.Tick += delegate
+            if (_cfg.ShowHint) _overlay.ShowHint("测试息屏（5 秒）\n按 Esc 或双击鼠标可提前结束", 4500);
+            SetTrayText("午休息屏：测试息屏中（5 秒）…");
+
+            if (_testTimer == null)
             {
-                _testing = false;
-                if (_overlay.Visible) _overlay.HideOverlay();
-                _testTimer.Stop();
-                _testTimer.Dispose();
-            };
+                _testTimer = new System.Windows.Forms.Timer();
+                _testTimer.Tick += delegate { EndTest(); };
+            }
+            _testTimer.Interval = 5000;
             _testTimer.Start();
+        }
+
+        private void EndTest()
+        {
+            if (!_testing) return;
+            _testing = false;
+            if (_testTimer != null) _testTimer.Stop();
+            Update();   // 按真实时段重新计算：在时段内保持息屏，否则立即恢复
         }
 
         private void ShowSettings()
         {
-            using (SettingsForm f = new SettingsForm(_cfg.StartTime, _cfg.EndTime, _cfg.Enabled, _cfg.Policy, _cfg.Days, IsAutoStart()))
+            using (SettingsForm f = new SettingsForm(_cfg.StartTime, _cfg.EndTime, _cfg.Enabled, _cfg.Policy, _cfg.Days, IsAutoStart(), _cfg.ShowHint))
             {
+                // 息屏中打开设置时，让窗口显示在黑屏之上
+                f.TopMost = _overlay.Visible;
                 if (f.ShowDialog() == DialogResult.OK)
                 {
                     _cfg.StartTime = f.StartSetting;
@@ -452,16 +570,36 @@ namespace NapScreenOff
                     _cfg.Enabled = f.EnabledSetting;
                     _cfg.Policy = f.PolicySetting;
                     _cfg.Days = f.DaysSetting;
+                    _cfg.ShowHint = f.ShowHintSetting;
                     _cfg.Save();
 
                     bool reg = IsAutoStart();
                     if (f.AutoStartSetting != reg) SetAutoStart(f.AutoStartSetting);
+                    else if (f.AutoStartSetting) SyncAutoStartPath();
 
                     _mAuto.Checked = f.AutoStartSetting;
                     _mEnable.Checked = _cfg.Enabled;
                     Update();
                 }
             }
+        }
+
+        // exe 被移动或改名后（整理文件夹、更新版本），自启动仍指向旧路径，这里自动纠正
+        private static void SyncAutoStartPath()
+        {
+            try
+            {
+                using (RegistryKey k = Registry.CurrentUser.OpenSubKey(RunKeyPath, true))
+                {
+                    if (k == null) return;
+                    string old = k.GetValue(RunValueName) as string;
+                    if (old == null) return;
+                    string cur = "\"" + Application.ExecutablePath + "\"";
+                    if (!string.Equals(old, cur, StringComparison.OrdinalIgnoreCase))
+                        k.SetValue(RunValueName, cur);
+                }
+            }
+            catch { }
         }
 
         private static bool IsAutoStart()
@@ -520,10 +658,19 @@ namespace NapScreenOff
 
     internal static class Program
     {
-        // 优先用 exe 同目录（方便整包分发）；目录不可写时（如 Program Files、共享盘）
-        // 改用各用户自己的 LocalAppData，保证人人可保存自己的设置
+        // 优先用 exe 同目录（方便整包分发）；以下两种情况改用各用户自己的 LocalAppData：
+        // 1) 目录不可写（Program Files 等）2) 网络共享路径（可写但多人共用，配置必须各人独立）
+        // 首次切换时若 exe 旁附带 config.ini（分发者预置的默认值），复制一份作为个人初始配置
         public static string ResolveConfigPath(string baseDir)
         {
+            bool isNetwork = baseDir.StartsWith(@"\\", StringComparison.Ordinal);
+            if (!isNetwork)
+            {
+                try { isNetwork = new DriveInfo(Path.GetPathRoot(Path.GetFullPath(baseDir))).DriveType == DriveType.Network; }
+                catch { }
+            }
+            if (isNetwork) return UserConfigPath(baseDir);
+
             try
             {
                 string probe = Path.Combine(baseDir, ".wprobe" + Environment.TickCount);
@@ -533,10 +680,23 @@ namespace NapScreenOff
             }
             catch
             {
-                string dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "NapScreenOff");
-                try { Directory.CreateDirectory(dir); } catch { }
-                return Path.Combine(dir, "config.ini");
+                return UserConfigPath(baseDir);
             }
+        }
+
+        private static string UserConfigPath(string baseDir)
+        {
+            string dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "NapScreenOff");
+            string path = Path.Combine(dir, "config.ini");
+            try
+            {
+                Directory.CreateDirectory(dir);
+                string shipped = Path.Combine(baseDir, "config.ini");
+                if (!File.Exists(path) && File.Exists(shipped))
+                    File.Copy(shipped, path, false);
+            }
+            catch { }
+            return path;
         }
 
         [STAThread]
